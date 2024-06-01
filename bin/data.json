@@ -1,0 +1,8 @@
+{
+  "metric": "app.test",
+  "timestamp": 1434706884,
+  "value": 50,
+  "tags": {
+    "pf": "qualif"
+  }
+}

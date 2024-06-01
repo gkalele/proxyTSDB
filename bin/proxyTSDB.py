@@ -9,8 +9,8 @@ import threading
 from optparse import OptionParser
 import time
 import socket
-import SocketServer
-import BaseHTTPServer
+import socketserver
+import http.server
 from logging import FileHandler
 import collections
 import dirq.QueueSimple
@@ -21,9 +21,9 @@ import random
 
 # GLOBAL VARIABLES
 
-DEFAULT_LOG = '/var/log/proxyTSDB.log'
-DEFAULT_OUT = '/var/log/proxyTSDB.out'
-DEFAULT_ERR = '/var/log/proxyTSDB.err'
+DEFAULT_LOG = 'proxyTSDB.log'
+DEFAULT_OUT = 'proxyTSDB.out'
+DEFAULT_ERR = 'proxyTSDB.err'
 LOG = logging.getLogger('proxyTSDB')
 DEFAULT_DIRQ_PATH = '/var/tmp/proxyTSDB-metrics'
 
@@ -36,7 +36,6 @@ DISK_METRIC_QUEUE = None
 
 RAM_MAX_SIZE = 0
 DISK_MAX_SIZE = 0
-
 
 class MetricReceiver(threading.Thread):
     """Thread for execute HTTP server which receive REST request"""
@@ -251,7 +250,7 @@ class MetricSenderOpenTSDB(MetricSender):
     def _pre_send(self):
         try:
             self.socket.settimeout(1)
-            self.socket.sendall("version\n")
+            self.socket.sendall("version\n".encode('utf-8'))
             self.socket.recv(1024)
             self.socket.settimeout(5)
         except socket.error:
@@ -262,7 +261,7 @@ class MetricSenderOpenTSDB(MetricSender):
         self.socket.close()
 
 
-class MetricHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+class MetricHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if re.match(r"/api/version", self.path) is not None:
@@ -277,23 +276,27 @@ class MetricHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def do_api_put(self):
         length = int(self.headers['Content-Length'])
         data = self.rfile.read(length)
-        in_json = json.loads(data)
+        try:
+            in_json = json.loads(data)
+        except:
+            LOG.warning("Invalid JSON seen - {}".format(data))
+            self.send_response(400, "bad json input data")
         try:
             metric = formatMetric(in_json)
             self.server.queue.append(metric)
-            self.wfile.write('metric '+in_json['metric']+' added')
+            self.wfile.write(('metric '+in_json['metric']+' added').encode('utf-8'))
             self.send_response(200, "metric added")
         except Exception as e:
             LOG.warning(e)
-            self.wfile.write('ERROR ' + e.message)
+            self.wfile.write(('ERROR ' + e.message).encode('utf-8'))
             self.send_response(500, "Can't add metric")
 
     def do_api_version(self):
         response = PROXYTSDB_VERSION
-        self.wfile.write(response)
+        self.wfile.write((response).encode('utf-8'))
 
 
-class MetricTelnetRequestHandler(SocketServer.BaseRequestHandler):
+class MetricTelnetRequestHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
         try:
@@ -351,12 +354,12 @@ class MetricTelnetRequestHandler(SocketServer.BaseRequestHandler):
                 elif re.match(r"version", data) is not None:
                     self.request.sendall(PROXYTSDB_VERSION)
                 else:
-                    self.request.sendall('ERROR: '+data)
+                    self.request.sendall(('ERROR: '+data).encode('utf-8'))
         except socket.error:
             pass
 
 
-class MetricServer(SocketServer.TCPServer):
+class MetricServer(socketserver.TCPServer):
     """Server with queue and set of threaded requests"""
 
     # Decides how threads will act upon termination of the
@@ -371,7 +374,7 @@ class MetricServer(SocketServer.TCPServer):
         except AttributeError:
             self.address_family = socket.AF_INET
 
-        SocketServer.TCPServer.__init__(self, server_address,
+        socketserver.TCPServer.__init__(self, server_address,
                                         RequestHandlerClass, bind_and_activate)
         self.queue = queue
         self._request_threads = set()
@@ -401,7 +404,7 @@ class MetricServer(SocketServer.TCPServer):
         t.start()
 
     def shutdown(self):
-        SocketServer.TCPServer.shutdown(self)
+        socketserver.TCPServer.shutdown(self)
         try:
             while True:
                 t = self._request_threads.pop()
@@ -411,11 +414,11 @@ class MetricServer(SocketServer.TCPServer):
             pass
 
 
-class MetricRequestHandler(SocketServer.BaseRequestHandler):
+class MetricRequestHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
-        data = self.request.recv(7, SocketServer.socket.MSG_PEEK).strip()
-        if re.match(r"(GET|POST)", data) is not None:
+        data = self.request.recv(7, socketserver.socket.MSG_PEEK).strip()
+        if re.match(r"(GET|POST)".encode("utf-8"), data) is not None:
             MetricHTTPRequestHandler(self.request,
                                      self.client_address, self.server)
         else:
@@ -479,7 +482,7 @@ def parse_cmdline(argv):
                       metavar='HOST',
                       help='Hostname to use to connect to the TSD.')
     parser.add_option('-P', '--pidfile', dest='pidfile',
-                      default='/var/run/proxyTSDB.pid',
+                      default='proxyTSDB.pid',
                       metavar='FILE', help='Write our pidfile')
     parser.add_option('--loglevel', dest='loglevel', type='str',
                       default='INFO',
@@ -511,7 +514,7 @@ def daemonize():
     if os.fork():
         os._exit(0)
     os.chdir("/")
-    os.umask(022)
+    os.umask(0o22)
     os.setsid()
     os.umask(0)
     if os.fork():
@@ -523,7 +526,7 @@ def daemonize():
     os.dup2(stdout.fileno(), 2)
     stdin.close()
     stdout.close()
-    os.umask(022)
+    os.umask(0o22)
     for fd in xrange(3, 1024):
         try:
             os.close(fd)
@@ -562,10 +565,6 @@ def main(argv):
     if options.daemonize:
         daemonize()
     setup_logging(options.logfile)
-    try:
-        LOG.setLevel(logging._levelNames[options.loglevel])
-    except KeyError:
-        LOG.error("Unknown log level : " + options.loglevel)
     if options.pidfile:
         write_pid(options.pidfile)
 
@@ -582,7 +581,7 @@ def main(argv):
     ram_buff_size = (options.ram_max_size * 1048576)/962
     disk_buff_size = (options.disk_max_size * 1048576)/962
 
-    metricQueue = collections.deque([], ram_buff_size)
+    metricQueue = collections.deque([], int(ram_buff_size))
     global METRIC_QUEUE
     METRIC_QUEUE = metricQueue
 
